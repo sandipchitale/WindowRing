@@ -6,6 +6,10 @@ import AppKit
 /// (Dock-visible) applications. Whichever ring is open last is "active" and
 /// owns mouse/keyboard selection; the shortcut collapses the rings back one
 /// at a time, while Escape (or a click outside) dismisses all of them at once.
+///
+/// Keyboard and scroll input reach the rings through GlobalShortcut's event
+/// tap rather than through the overlay panel, so the panel never has to take
+/// key focus away from the app the user is actually working in.
 final class RingController {
     private let preferences: Preferences
     private let mruTracker = WindowMRUTracker()
@@ -13,15 +17,28 @@ final class RingController {
 
     private lazy var shortcut: GlobalShortcut = {
         let shortcut = GlobalShortcut(combo: preferences.shortcutCombo)
-        shortcut.onPress = { [weak self] in self?.handleShortcutPress() }
-        // Releasing the shortcut no longer dismisses anything: rings stay
-        // open so they can be driven by keyboard (arrow keys / Tab / Return)
-        // or the mouse. Only Escape (cancel) and Return/click (confirm) act.
+        // Fires on a clean *tap* of the combo, not on press — see
+        // GlobalShortcut for why. Rings stay open afterwards, driven by the
+        // keyboard (arrows / Tab / digits / Return), scroll, or the mouse.
+        // Deferred, not called inline: this runs inside the CGEventTap
+        // callback, and building a ring does a full AX sweep of every running
+        // app. Block the tap long enough and macOS disables it outright
+        // (kCGEventTapDisabledByTimeout), which would kill the shortcut until
+        // the next re-enable. The same goes for confirm, which activates
+        // windows over AX.
+        shortcut.onTrigger = { [weak self] in
+            DispatchQueue.main.async { self?.handleShortcutPress() }
+        }
+        shortcut.onKeyDown = { [weak self] code, flags in
+            self?.handleKeyDown(code, flags: flags) ?? false
+        }
+        shortcut.onScroll = { [weak self] steps in
+            self?.handleScroll(steps: steps) ?? false
+        }
         return shortcut
     }()
 
     private var mouseMonitor: Any?
-    private var escapeMonitor: Any?
     private var outsideClickMonitor: Any?
     private var session: RingSessionState?
     private var dockSession: RingSessionState?
@@ -41,11 +58,68 @@ final class RingController {
 
     init(preferences: Preferences) {
         self.preferences = preferences
-        overlayWindow.onEscape = { [weak self] in self?.endSession(activate: false) }
-        overlayWindow.onConfirm = { [weak self] in self?.confirmActiveSelection() }
-        overlayWindow.onRotateClockwise = { [weak self] in self?.activeSession?.rotateSelection(clockwise: true) }
-        overlayWindow.onRotateCounterClockwise = { [weak self] in self?.activeSession?.rotateSelection(clockwise: false) }
         overlayWindow.onMouseDownAt = { [weak self] point in self?.handleMouseDown(atWindowPoint: point) }
+    }
+
+    /// Every keystroke in the system passes through here. Returns true only
+    /// for keys a visible ring actually acts on — everything else falls
+    /// through to whatever app the user was working in, untouched.
+    ///
+    /// Any key that isn't part of the ring's own vocabulary dismisses the ring
+    /// *and* passes through: starting to type simply gets the ring out of the
+    /// way, rather than stranding it on screen or eating the keystroke.
+    private func handleKeyDown(_ code: CGKeyCode, flags: NSEvent.ModifierFlags) -> Bool {
+        guard session != nil else { return false }
+
+        switch code {
+        case VirtualKey.escape:
+            endSession(activate: false)
+            return true
+        case VirtualKey.returnKey, VirtualKey.keypadEnter:
+            deferred { $0.confirmActiveSelection() }
+            return true
+        case VirtualKey.rightArrow:
+            activeSession?.rotateSelection(clockwise: true)
+            return true
+        case VirtualKey.leftArrow:
+            activeSession?.rotateSelection(clockwise: false)
+            return true
+        case VirtualKey.tab:
+            activeSession?.rotateSelection(clockwise: !flags.contains(.shift))
+            return true
+        default:
+            // 1–9 jump straight to that item and confirm it, matching the
+            // index badges drawn on the ring.
+            if let index = VirtualKey.digitIndex(for: code),
+               let active = activeSession,
+               active.windows.indices.contains(index) {
+                active.selectedIndex = index
+                deferred { $0.confirmActiveSelection() }
+                return true
+            }
+            endSession(activate: false)
+            return false
+        }
+    }
+
+    /// Runs `body` after the current event-tap callback has returned. See the
+    /// note on `onTrigger` for why anything touching AX must not run inline.
+    private func deferred(_ body: @escaping (RingController) -> Void) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            body(self)
+        }
+    }
+
+    /// Scroll rotates the selection: down/right is clockwise. Swallowed
+    /// whenever a ring is up — including the sub-step scrolls that don't move
+    /// the selection — so the view underneath doesn't scroll along with it.
+    private func handleScroll(steps: Int) -> Bool {
+        guard let active = activeSession, !active.windows.isEmpty else { return false }
+        for _ in 0..<abs(steps) {
+            active.rotateSelection(clockwise: steps > 0)
+        }
+        return true
     }
 
     /// A click inside the overlay's own frame: confirm if it landed within
@@ -169,18 +243,6 @@ final class RingController {
             self.activeSession?.updateSelection(forGlobalMouse: NSEvent.mouseLocation, windowFrame: self.windowFrame)
         }
 
-        // Since rings now stay open after the shortcut is released, the
-        // overlay panel can lose key-window status later (e.g. the user
-        // clicks another app) and stop seeing Escape locally. A global
-        // monitor guarantees Escape always works regardless of focus,
-        // without needing Accessibility beyond what's already required for
-        // the shortcut itself.
-        escapeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == VirtualKey.escape {
-                self?.endSession(activate: false)
-            }
-        }
-
         // A click anywhere outside the overlay's own frame entirely (another
         // app's window, the desktop) hides every ring at once, same as a
         // click landing inside the frame but outside every ring's disc.
@@ -211,14 +273,10 @@ final class RingController {
         if let mouseMonitor {
             NSEvent.removeMonitor(mouseMonitor)
         }
-        if let escapeMonitor {
-            NSEvent.removeMonitor(escapeMonitor)
-        }
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
         }
         mouseMonitor = nil
-        escapeMonitor = nil
         outsideClickMonitor = nil
         overlayWindow.dismiss()
         session = nil

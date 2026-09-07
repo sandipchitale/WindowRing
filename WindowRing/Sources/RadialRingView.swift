@@ -15,7 +15,10 @@ struct RadialRingContainerView: View {
 
     var body: some View {
         ZStack {
-            RadialRingLayer(state: state)
+            // Once the dock ring owns selection, the window ring stops
+            // drawing its wedge: two lit wedges at once read as two live
+            // selections, when only the outer one actually is.
+            RadialRingLayer(state: state, showsSelectionWedge: dockState.windows.isEmpty)
             RadialRingLayer(state: dockState, highlightSpansFullBand: true)
             centerLabel
         }
@@ -64,6 +67,10 @@ private struct RadialRingLayer: View {
     /// thickness (edge to edge) instead of just an inset outer band — used
     /// for the dock ring, whose entire width is the "button".
     var highlightSpansFullBand: Bool = false
+    /// Whether this ring draws its selection wedge at all. The window ring
+    /// turns it off while the dock ring is up, since it's no longer the ring
+    /// the mouse and keyboard are driving.
+    var showsSelectionWedge: Bool = true
 
     private var wedgeHalfStep: CGFloat {
         state.windows.count > 1 ? (.pi / CGFloat(state.windows.count)) : .pi
@@ -108,7 +115,7 @@ private struct RadialRingLayer: View {
                         outerRadius: highlightOuterRadius,
                         startAngle: .radians(Double(placement.angle - wedgeHalfStep)),
                         endAngle: .radians(Double(placement.angle + wedgeHalfStep)),
-                        isSelected: index == state.selectedIndex
+                        isSelected: showsSelectionWedge && index == state.selectedIndex
                     )
                 }
                 ForEach(Array(zip(state.windows.indices, placements)), id: \.0) { index, placement in
@@ -247,16 +254,21 @@ private struct WedgeSliceView: View {
 }
 
 /// Just the icon circle — the window's title only appears once, in the
-/// ring's center hub, for whichever item is currently selected.
+/// ring's center hub, for whichever item is currently selected. The 1-9 keys
+/// still jump straight to the first nine items, but deliberately without any
+/// badge saying so: the numbers cluttered every icon to advertise a shortcut
+/// worth learning once.
 private struct RingIconView: View {
     let window: WindowInfo
     let isSelected: Bool
+
+    private var diameter: CGFloat { isSelected ? 64 : 52 }
 
     var body: some View {
         ZStack {
             Circle()
                 .fill(.ultraThinMaterial)
-                .frame(width: isSelected ? 64 : 52, height: isSelected ? 64 : 52)
+                .frame(width: diameter, height: diameter)
                 .overlay(
                     Circle().strokeBorder(
                         isSelected ? Color.accentColor : Color.white.opacity(0.25),
@@ -270,6 +282,7 @@ private struct RingIconView: View {
                     .frame(width: isSelected ? 40 : 32, height: isSelected ? 40 : 32)
             }
         }
+        .frame(width: diameter, height: diameter)
         .shadow(color: .black.opacity(isSelected ? 0.35 : 0.15), radius: isSelected ? 8 : 3)
         .scaleEffect(isSelected ? 1.08 : 1.0)
         .animation(.spring(response: 0.22, dampingFraction: 0.75), value: isSelected)

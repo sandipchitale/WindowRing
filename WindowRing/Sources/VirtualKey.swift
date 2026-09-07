@@ -21,6 +21,16 @@ enum VirtualKey {
     static let rightArrow: CGKeyCode = 124
     static let tab: CGKeyCode = 48
 
+    /// Number row 1–9, in order. Not contiguous as keycodes (5 and 6 are
+    /// swapped relative to what you'd expect), so they're listed explicitly.
+    static let digits: [CGKeyCode] = [18, 19, 20, 21, 23, 22, 26, 28, 25]
+
+    /// The zero-based ring index a number key selects, or nil if `code` isn't
+    /// one of 1–9.
+    static func digitIndex(for code: CGKeyCode) -> Int? {
+        digits.firstIndex(of: code)
+    }
+
     private static let allModifiers: Set<CGKeyCode> = [
         optionLeft, optionRight, controlLeft, controlRight,
         commandLeft, commandRight, shiftLeft, shiftRight

@@ -3,17 +3,18 @@ import SwiftUI
 
 /// The transient overlay panel the ring is drawn in.
 ///
-/// `.nonactivatingPanel` lets it become key (so it can receive the Escape
-/// keydown directly) and accept mouse clicks without activating Window Ring
-/// or stealing focus from whatever app was frontmost — matching the "no
-/// unnecessary focus stealing" requirement. Hover selection is still driven
-/// by a global mouse-moved monitor owned by RingController; a click on a ring
-/// confirms whatever's selected, and a click outside every ring dismisses.
+/// The panel deliberately **never becomes key**. It used to call `makeKey()`
+/// so it could receive keystrokes through `keyDown(with:)`, but that meant an
+/// open ring swallowed the keyboard: anything typed went to the ring instead
+/// of the document the user was working in. All ring keyboard handling now
+/// goes through RingController's event tap instead, which can act on the keys
+/// it wants and pass the rest straight through to the app underneath.
+/// `.nonactivatingPanel` plus `acceptsFirstMouse` keeps clicks working without
+/// activating Window Ring or pulling focus off the frontmost app. Hover
+/// selection is driven by a global mouse-moved monitor owned by
+/// RingController; a click on a ring confirms whatever's selected, and a click
+/// outside every ring dismisses.
 final class RadialOverlayWindow: NSPanel {
-    var onEscape: (() -> Void)?
-    var onConfirm: (() -> Void)?
-    var onRotateClockwise: (() -> Void)?
-    var onRotateCounterClockwise: (() -> Void)?
     /// A click landed somewhere in this panel's frame, at this window-local
     /// (AppKit y-up) point. RingController decides whether that point is
     /// actually on a ring (confirm) or in the panel's transparent margin
@@ -37,39 +38,20 @@ final class RadialOverlayWindow: NSPanel {
         alphaValue = 0
     }
 
-    override var canBecomeKey: Bool { true }
+    // Never take key status — see the type comment. Without this, merely
+    // clicking the ring would pull the keyboard away from the frontmost app.
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
         onMouseDownAt?(event.locationInWindow)
     }
 
-    override func keyDown(with event: NSEvent) {
-        switch event.keyCode {
-        case VirtualKey.escape:
-            onEscape?()
-        case VirtualKey.returnKey, VirtualKey.keypadEnter:
-            onConfirm?()
-        case VirtualKey.rightArrow:
-            onRotateClockwise?()
-        case VirtualKey.leftArrow:
-            onRotateCounterClockwise?()
-        case VirtualKey.tab:
-            if event.modifierFlags.contains(.shift) {
-                onRotateCounterClockwise?()
-            } else {
-                onRotateClockwise?()
-            }
-        default:
-            super.keyDown(with: event)
-        }
-    }
-
     func presentSession(state: RingSessionState, dockState: RingSessionState, frame: NSRect) {
-        contentView = NSHostingView(rootView: RadialRingContainerView(state: state, dockState: dockState))
+        contentView = FirstMouseHostingView(rootView: RadialRingContainerView(state: state, dockState: dockState))
         setFrame(frame, display: true)
         alphaValue = 0
         orderFrontRegardless()
-        makeKey()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.12
             self.animator().alphaValue = 1
@@ -88,4 +70,12 @@ final class RadialOverlayWindow: NSPanel {
             }
         )
     }
+}
+
+/// Window Ring is never the active app while a ring is showing, so without
+/// `acceptsFirstMouse` the user's first click would be spent activating the
+/// panel instead of being delivered as a `mouseDown` — meaning click-to-
+/// confirm would silently need two clicks.
+private final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }

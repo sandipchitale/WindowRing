@@ -53,7 +53,8 @@ On launch, Window Ring immediately requests **Accessibility** access. This is
 the *only* permission it needs, and it's required for three specific things:
 
 1. Reading window titles and minimized state via the Accessibility (AX) API.
-2. Detecting the global shortcut via a `CGEventTap`.
+2. Detecting the global shortcut, and reading ring keyboard/scroll input, via
+   a `CGEventTap`.
 3. Raising/activating the window you point at.
 
 If you dismiss the prompt or need to grant it later: **System Settings →
@@ -82,13 +83,20 @@ this, and the project is unsandboxed by design (no entitlements file at all).
 
 ### The window ring (inner)
 
-- **Press Right Option (⌥)** anywhere — the ring appears at your cursor,
-  showing your windows ordered most-recently-used first, with the active app at
-  the top of the ring (12 o'clock).
-- **Releasing the shortcut does nothing.** The ring stays up until you confirm
-  or cancel.
+- **Tap Right Option (⌥)** anywhere — press and release it without touching
+  anything else, and the ring appears at your cursor, showing your windows
+  ordered most-recently-used first, with the active app at the top of the ring
+  (12 o'clock). It's a *tap*, not a hold: the ring opens on release and then
+  stays up until you confirm or cancel.
+- **⌥e still types é.** Because the shortcut only fires on a clean release, any
+  other key or a mouse click during the hold cancels it, so using Right Option
+  as the dead-key modifier it also is never opens the ring.
 - **Move the mouse** toward a window to select it: its wedge highlights, its
-  icon grows, and its title appears in the ring's center hub.
+  icon grows, and its title appears in the ring's center hub. **Scrolling**
+  rotates the selection too.
+- **Press 1–9** to jump straight to that item and activate it, counting
+  clockwise from the top. There's no badge on the icons saying so — the numbers
+  cluttered every item to advertise something worth learning once.
 - **Confirm** with **Return**/**Enter**, or by **clicking anywhere on the
   ring**. The window unminimizes/unhides if needed, comes to the front, and
   macOS switches Spaces automatically if it's on another one.
@@ -98,7 +106,7 @@ this, and the project is unsandboxed by design (no entitlements file at all).
 
 ### The app ring (outer) — a radial Dock
 
-- **Press Right Option again** while the window ring is up: a second, outer
+- **Tap Right Option again** while the window ring is up: a second, outer
   ring appears listing your **applications** — everything pinned in your real
   Dock (read from `com.apple.dock`'s `persistent-apps`), plus any running app
   that isn't pinned.
@@ -108,8 +116,8 @@ this, and the project is unsandboxed by design (no entitlements file at all).
   whole band is the button.
 - **Confirm** launches the app if it isn't running, or activates it (unhiding
   first if needed) if it is.
-- **Press Right Option a third time** to collapse the outer ring, leaving the
-  window ring up. A **fourth** press dismisses everything.
+- **A third tap** collapses the outer ring, leaving the window ring up. A
+  **fourth** dismisses everything.
 - **Escape** and clicking outside always dismiss *everything* at once, from
   either ring.
 
@@ -120,11 +128,20 @@ this, and the project is unsandboxed by design (no entitlements file at all).
 | Right Option (default shortcut) | Open the window ring → open the app ring → collapse the app ring → dismiss |
 | → or Tab | Select the next item clockwise |
 | ← or Shift-Tab | Select the next item counter-clockwise |
+| Scroll down / up | Select the next item clockwise / counter-clockwise |
+| 1–9 | Select that item and confirm immediately |
 | Return / Enter | Confirm the selection |
 | Escape | Dismiss every ring, activating nothing |
+| Anything else | Dismiss the ring, and the keystroke goes to the app underneath |
 
 Arrow and Tab keys work on their own — you do **not** hold the shortcut while
 navigating.
+
+**The ring never takes keyboard focus.** The overlay panel deliberately can't
+become key; the keys above are picked off by the event tap and swallowed, and
+every other keystroke passes straight through to whatever app you were working
+in (dismissing the ring on the way). So an open ring can't strand your
+keyboard, and typing is always a way out of it.
 
 ### Other behavior
 
@@ -133,8 +150,8 @@ navigating.
 - **Finder is excluded when it has no windows open.** Finder always publishes
   the desktop in its AX window list, so it would otherwise appear permanently
   as a phantom "Finder" entry (see Known macOS limitations).
-- Holding the shortcut never interferes with ⌘Tab, Mission Control, or anything
-  else: the event tap is `.listenOnly` and never consumes or rewrites events.
+- The shortcut never interferes with ⌘Tab, Mission Control, or anything else:
+  the event tap consumes nothing unless a ring is actually on screen.
 
 ## The ring's visual design
 
@@ -155,11 +172,13 @@ crowded ring readable and lets long titles have real width.
 
 Click the menu-bar icon → **Preferences…** → **Change…** next to the
 shortcut, then press and release the modifier key(s) you want (e.g. hold
-⌃⌥ together, then let go). The recorder only needs to see your own
+⌃⌥ together, then let go). Whatever you pick is triggered by *tapping* it —
+pressing and releasing with nothing else touched in between. The recorder only needs to see your own
 Preferences window get the keystrokes — no extra permission beyond the
 Accessibility grant above.
 
 Preferences also let you:
+- **Launch Window Ring at login.**
 - Include/exclude minimized windows.
 - Include/exclude hidden applications.
 - Set how many windows the ring shows at most (3–12, default 8).
@@ -182,11 +201,11 @@ reliable global shortcut/overlay/window-activation behavior.
 | `WindowMRUTracker.swift` | Builds most-recently-focused-window history via `AXObserver`. |
 | `WindowOrdering.swift` | `WindowOrderingPolicy` protocol; `MRUOrdering` is the only policy implemented. |
 | `RadialLayout.swift` | Pure geometry: item placement around a circle, nearest-item hit-testing from a mouse point, global↔view coordinate conversion. No AppKit dependency. |
-| `RadialOverlayWindow.swift` | Borderless, non-activating `NSPanel` hosting both ring layers; handles Escape/Return/arrows/Tab and forwards clicks. |
+| `RadialOverlayWindow.swift` | Borderless, non-activating `NSPanel` hosting both ring layers. Never becomes key; forwards clicks to `RingController`. |
 | `RadialRingView.swift` | SwiftUI ring UI: `RadialRingContainerView` composes both ring layers plus the shared center label; `WedgeShape` (inset, rounded-corner pie slice) and `AnnulusShape` do the drawing. |
 | `RingSessionState.swift` | Live per-ring state (item list, geometry, selected index) driving the SwiftUI view. One instance per ring. |
 | `RingController.swift` | Orchestrates a session across both rings: open, promote, collapse, confirm, dismiss. |
-| `GlobalShortcut.swift` | `CGEventTap`-based detector for a configurable set of modifier keys. |
+| `GlobalShortcut.swift` | `CGEventTap` that detects a clean *tap* of a configurable modifier combo, and routes keyboard/scroll events to the ring, consuming the ones it handles. |
 | `WindowActivation.swift` | Un-minimize/un-hide/activate/raise sequence for the selected window. |
 | `PermissionsManager.swift` | Accessibility-trust check, prompt, polling, and deep link to System Settings. |
 | `Preferences.swift` / `PreferencesView.swift` | UserDefaults-backed settings + the settings window, including the shortcut recorder. |
@@ -214,24 +233,30 @@ log show --predicate 'process == "WindowRing"' --last 5m | grep '\[WindowRing\]'
   Screen Recording permission — since Catalina, that CG API redacts window
   titles for other processes unless the caller has screen-recording access,
   while the AX API gives titles with just Accessibility trust.
-- **`CGEventTap`** (session-level, `.listenOnly`) for detecting the global
-  shortcut without ever consuming/rewriting events, so system shortcuts are
-  never affected.
-- **`NSEvent.addGlobalMonitorForEvents`** for three things while a ring is
-  shown: `.mouseMoved` to track the cursor, `.keyDown` to catch Escape, and
-  `[.leftMouseDown, .rightMouseDown]` to catch clicks outside the overlay. The
-  Escape monitor is global rather than local because the non-activating panel
-  loses key-window status as soon as you click another app, which would
-  otherwise strand the ring on screen.
+- **`CGEventTap`** (session-level, `.defaultTap`) for detecting the global
+  shortcut and for all ring keyboard/scroll input. It consumes an event *only*
+  while a ring is on screen and *only* for the keys the ring itself acts on;
+  with no ring up everything passes through untouched, so ⌘Tab and other system
+  shortcuts are unaffected. An `NSEvent` global monitor was not an option here
+  because monitors cannot consume: Return would confirm the ring *and* land in
+  the app underneath.
+- **`NSEvent.addGlobalMonitorForEvents`** for the two things while a ring is
+  shown that don't need consuming: `.mouseMoved` to track the cursor, and
+  `[.leftMouseDown, .rightMouseDown]` to catch clicks outside the overlay.
 - **`UserDefaults(suiteName: "com.apple.dock")`** to read the real Dock's
   `persistent-apps` list, so the outer ring mirrors the Dock the user actually
   arranged.
 - **`NSWorkspace.openApplication(at:configuration:)`** to launch apps from the
   outer ring, and **`NSRunningApplication`** for app icons, unhide, and
   app-level activation.
-- **`NSPanel` with `.borderless, .nonactivatingPanel`** for the overlay, so it
-  can receive clicks and keystrokes without activating Window Ring or stealing
-  focus from whatever app was frontmost.
+- **`SMAppService.mainApp`** for the launch-at-login toggle. The state lives in
+  launchd, not UserDefaults, and is re-read every time Preferences opens — the
+  user can remove the login item from System Settings without telling us.
+- **`NSPanel` with `.borderless, .nonactivatingPanel`** for the overlay, with
+  `canBecomeKey` forced to false so it can receive clicks without ever
+  activating Window Ring or pulling focus off the frontmost app. Its content
+  view overrides `acceptsFirstMouse` so the first click confirms rather than
+  being spent activating the panel.
 - **`NSScreen`** to find which display the cursor is on and clamp the overlay
   inside that display's visible frame, handling multi-monitor setups and
   per-display scale factors (handled automatically by AppKit).
@@ -257,6 +282,13 @@ and worth flagging for anyone changing the relevant files:
   entire north-west arc of the outer ring. The difference must be reduced into
   [0, 2π) *before* the π check. The size of the broken arc scales with item
   count, which is why only the item-dense outer ring showed it.
+- **Nothing slow may run inside the event-tap callback.** Opening a ring does
+  a full AX sweep of every running app, and confirming activates a window over
+  AX. Run either inline in the tap callback and macOS will eventually decide
+  the tap is unresponsive and disable it (`kCGEventTapDisabledByTimeout`),
+  silently killing the shortcut. `RingController` therefore hops to the main
+  queue before doing any of that work, while still returning the
+  consume/pass-through decision to the tap synchronously.
 - **Distinct synthetic pids in `DockDiscovery`.** `AXUIElementCreateApplication`
   called with the same pid twice returns elements that compare `CFEqual`, so
   using a single placeholder pid (e.g. `0`) for every not-yet-running pinned

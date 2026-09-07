@@ -10,10 +10,15 @@ struct PreferencesView: View {
 
     var body: some View {
         Form {
+            Section("General") {
+                Toggle("Launch Window Ring at login", isOn: $preferences.launchAtLogin)
+            }
+
             Section("Global Shortcut") {
                 HStack {
-                    Text("Hold:")
+                    Text("Tap:")
                     Text(isRecording ? "Press and release the new key(s)…" : comboDescription)
+                        .help("Tap these keys — press and release with nothing else — to open the ring.")
                         .font(.system(.body, design: .monospaced))
                     Spacer()
                     Button(isRecording ? "Cancel" : "Change…") {
@@ -50,6 +55,9 @@ struct PreferencesView: View {
         }
         .padding(20)
         .frame(width: 440)
+        // The user can remove the login item from System Settings without us
+        // hearing about it, so never trust the cached value on reopen.
+        .onAppear { preferences.refreshLaunchAtLogin() }
     }
 
     private var comboDescription: String {
