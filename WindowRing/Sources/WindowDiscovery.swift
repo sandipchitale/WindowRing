@@ -24,11 +24,18 @@ enum WindowDiscovery {
             }
 
             for axWindow in axWindows {
-                // Read minimized state first: it's part of deciding whether
-                // this counts as a window at all, not just whether to show it.
+                // Role is checked before anything else is read: it rejects the
+                // most elements (Finder's desktop, sheets, popovers, palettes)
+                // and every further attribute is a separate cross-process
+                // round trip, paid per element on the sweep the user is
+                // waiting on.
+                guard hasWindowRole(axWindow) else { continue }
+
+                // Minimized state is part of deciding whether this counts as a
+                // window at all, not just whether to show it.
                 let minimized = (copyAttribute(axWindow, kAXMinimizedAttribute) as? Bool) ?? false
-                guard isRingWorthyWindow(axWindow, isMinimized: minimized) else { continue }
                 if minimized && !includeMinimized { continue }
+                guard hasWindowSubrole(axWindow, isMinimized: minimized) else { continue }
 
                 let rawTitle = (copyAttribute(axWindow, kAXTitleAttribute) as? String) ?? ""
                 let title = rawTitle.isEmpty ? (app.localizedName ?? "Window") : rawTitle
@@ -49,16 +56,18 @@ enum WindowDiscovery {
         return results
     }
 
-    /// Filters out palettes, sheets, and other non-window AX elements so the
-    /// ring only shows things a user would recognize as "a window".
-    private static func isRingWorthyWindow(_ element: AXUIElement, isMinimized: Bool) -> Bool {
-        // The role check is what keeps the Finder out of the ring when it has
-        // no windows open: the desktop is published in Finder's
-        // kAXWindowsAttribute as an AXScrollArea with no subrole at all, so
-        // the lenient subrole rules below would otherwise let it through.
-        guard let role = copyAttribute(element, kAXRoleAttribute) as? String, role == kAXWindowRole else {
-            return false
-        }
+    /// The first half of "is this a window a user would switch to": it must
+    /// actually be one. This is what keeps the Finder out of the ring when it
+    /// has no windows open — the desktop is published in Finder's
+    /// kAXWindowsAttribute as an AXScrollArea with no subrole at all, so the
+    /// lenient subrole rules below would otherwise let it through.
+    private static func hasWindowRole(_ element: AXUIElement) -> Bool {
+        (copyAttribute(element, kAXRoleAttribute) as? String) == kAXWindowRole
+    }
+
+    /// The second half: filters out dialogs, palettes and sheets, which are
+    /// windows by role but not things a user switches between.
+    private static func hasWindowSubrole(_ element: AXUIElement, isMinimized: Bool) -> Bool {
         guard let subrole = copyAttribute(element, kAXSubroleAttribute) as? String else {
             // Some apps (older Java/cross-platform toolkits) omit subrole entirely;
             // don't punish them for it.

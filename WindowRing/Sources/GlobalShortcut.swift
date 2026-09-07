@@ -34,21 +34,29 @@ import CoreGraphics
 /// family at once. That combination isn't offered by the shortcut recorder.
 final class GlobalShortcut {
     var combo: Set<CGKeyCode>
-    /// Modifier keys that may be held *alongside* the combo without spoiling
-    /// the tap. They don't open a different shortcut so much as qualify this
-    /// one: which of them were held is reported to `onTrigger`, letting the
-    /// same tap mean something slightly different (⌘ + the combo opens the
-    /// app ring first). Everything not listed here still cancels the tap.
-    var augmentingModifiers: Set<CGKeyCode> = [VirtualKey.commandLeft, VirtualKey.commandRight]
+    /// Modifiers that may be held *alongside* the combo without spoiling the
+    /// tap. They don't open a different shortcut so much as qualify this one:
+    /// which of them were held is reported to `onTrigger`, letting the same
+    /// tap mean something slightly different (⌘ + the combo opens the app ring
+    /// first). Everything not listed here still cancels the tap. Expressed as
+    /// flags rather than keycodes because no caller cares which side of the
+    /// keyboard the key was on.
+    var qualifyingModifiers: NSEvent.ModifierFlags = .command
     /// The combo was tapped cleanly: pressed and released with nothing but
-    /// `augmentingModifiers` touched in between. The argument is whichever of
+    /// `qualifyingModifiers` touched in between. The argument is whichever of
     /// those were held at any point during the hold.
-    var onTrigger: ((Set<CGKeyCode>) -> Void)?
+    var onTrigger: ((NSEvent.ModifierFlags) -> Void)?
     /// A key went down. Return true to act on it *and* swallow it.
     var onKeyDown: ((CGKeyCode, NSEvent.ModifierFlags) -> Bool)?
     /// A scroll happened, already normalized to "steps clockwise" (negative =
     /// counter-clockwise). Return true to swallow it.
     var onScroll: ((Int) -> Bool)?
+    /// Whether a ring is currently on screen. Scroll is the one event class
+    /// this tap has no use for otherwise, and a trackpad emits a continuous
+    /// stream of them — so while no ring is showing they're rejected before
+    /// anything is read off the event, rather than being decoded and offered
+    /// to a handler that would only decline them.
+    var ringIsVisible = false
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -62,10 +70,10 @@ final class GlobalShortcut {
     /// began. Cleared by any foreign key or mouse button; if it's still true
     /// when the combo is released, that release is a tap.
     private var holdIsClean = false
-    /// Which augmenting modifiers were held at any point during this hold.
+    /// Which qualifying modifiers were held at any point during this hold.
     /// Accumulated rather than sampled at release, because the user may well
     /// let go of ⌘ a moment before the combo key itself.
-    private var augmentsDuringHold: Set<CGKeyCode> = []
+    private var qualifiersDuringHold: NSEvent.ModifierFlags = []
     /// Accumulated scroll distance not yet spent on a selection step.
     private var scrollAccumulator = 0.0
 
@@ -138,16 +146,17 @@ final class GlobalShortcut {
         modifiersDown.removeAll()
         isHoldingCombo = false
         holdIsClean = false
-        augmentsDuringHold = []
+        qualifiersDuringHold = []
         scrollAccumulator = 0
     }
 
     /// Returns true if the event was consumed and must not reach anyone else.
+    /// Every keystroke, scroll and click in the system reaches this method, so
+    /// each case does as little as possible before bailing out.
     private func handle(type: CGEventType, event: CGEvent) -> Bool {
-        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-
         switch type {
         case .scrollWheel:
+            guard ringIsVisible else { return false }
             return handleScroll(event)
 
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
@@ -159,18 +168,20 @@ final class GlobalShortcut {
         case .keyDown:
             // Offer it to the ring first — Escape/Return/arrows/Tab/digits are
             // consumed while a ring is up, everything else falls through.
+            let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
             let flags = NSEvent.ModifierFlags(rawValue: UInt(event.flags.rawValue))
             let consumed = onKeyDown?(keyCode, flags) ?? false
-            if !combo.contains(keyCode) {
-                holdIsClean = false
-            }
+            // A combo is always modifiers only, which never produce keyDown,
+            // so any key arriving here spoils the tap.
+            holdIsClean = false
             return consumed
 
         case .flagsChanged:
+            let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
             if isModifierPhysicallyDown(keyCode, flags: event.flags) {
                 modifiersDown.insert(keyCode)
-                if augmentingModifiers.contains(keyCode) {
-                    if isHoldingCombo { augmentsDuringHold.insert(keyCode) }
+                if let qualifier = qualifier(for: keyCode) {
+                    if isHoldingCombo { qualifiersDuringHold.insert(qualifier) }
                 } else if !combo.contains(keyCode) {
                     holdIsClean = false
                 }
@@ -193,21 +204,29 @@ final class GlobalShortcut {
         if satisfied && !isHoldingCombo {
             isHoldingCombo = true
             // Any modifier already down that is neither part of the combo nor
-            // an allowed augment (e.g. the user was already holding Shift)
+            // an allowed qualifier (e.g. the user was already holding Shift)
             // makes this hold dirty from the start.
-            let extras = modifiersDown.subtracting(combo)
-            holdIsClean = extras.isSubset(of: augmentingModifiers)
-            augmentsDuringHold = extras.intersection(augmentingModifiers)
+            var qualifiers: NSEvent.ModifierFlags = []
+            var isClean = true
+            for code in modifiersDown.subtracting(combo) {
+                if let qualifier = qualifier(for: code) {
+                    qualifiers.insert(qualifier)
+                } else {
+                    isClean = false
+                }
+            }
+            holdIsClean = isClean
+            qualifiersDuringHold = qualifiers
         } else if !satisfied && isHoldingCombo {
             isHoldingCombo = false
             if holdIsClean {
-                debugLog("[WindowRing] GlobalShortcut: clean tap of \(combo), augments=\(augmentsDuringHold)")
-                onTrigger?(augmentsDuringHold)
+                debugLog("[WindowRing] GlobalShortcut: clean tap of \(combo), qualifiers=\(qualifiersDuringHold.rawValue)")
+                onTrigger?(qualifiersDuringHold)
             } else {
                 debugLog("[WindowRing] GlobalShortcut: hold was dirty, not triggering")
             }
             holdIsClean = false
-            augmentsDuringHold = []
+            qualifiersDuringHold = []
         }
     }
 
@@ -227,20 +246,23 @@ final class GlobalShortcut {
         // advance clockwise, the same direction ↓/Tab moves.
         scrollAccumulator += -raw
         let threshold = isContinuous ? 24.0 : 1.0
-        var steps = 0
-        while scrollAccumulator >= threshold {
-            scrollAccumulator -= threshold
-            steps += 1
-        }
-        while scrollAccumulator <= -threshold {
-            scrollAccumulator += threshold
-            steps -= 1
-        }
+        let steps = Int((scrollAccumulator / threshold).rounded(.towardZero))
+        scrollAccumulator -= Double(steps) * threshold
 
         // Ask even for a zero-step scroll: if a ring is up we want to swallow
         // the whole gesture, not just the events that happen to cross a step
         // boundary, or the view underneath scrolls in fits and starts.
         return onScroll?(steps) ?? false
+    }
+
+    /// The qualifying modifier this keycode represents, or nil if it isn't one
+    /// — collapsing left/right into a single family via the mapping VirtualKey
+    /// already owns, so callers never deal in sides.
+    private func qualifier(for keyCode: CGKeyCode) -> NSEvent.ModifierFlags? {
+        let mask = VirtualKey.flagMask(for: keyCode)
+        guard mask != 0 else { return nil }
+        let flag = NSEvent.ModifierFlags(rawValue: mask)
+        return qualifyingModifiers.contains(flag) ? flag : nil
     }
 
     private func isModifierPhysicallyDown(_ keyCode: CGKeyCode, flags: CGEventFlags) -> Bool {

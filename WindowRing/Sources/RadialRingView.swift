@@ -7,18 +7,14 @@ struct RadialRingContainerView: View {
     @ObservedObject var state: RingSessionState
     @ObservedObject var dockState: RingSessionState
 
-    /// The dock ring, once opened, owns all selection feedback; the window
-    /// ring keeps its own last selection underneath but is no longer "live".
+    /// Whichever ring is currently on screen owns all selection feedback.
     private var activeState: RingSessionState {
-        dockState.windows.isEmpty ? state : dockState
+        dockState.isHidden ? state : dockState
     }
 
     var body: some View {
         ZStack {
-            // Once the dock ring owns selection, the window ring stops
-            // drawing its wedge: two lit wedges at once read as two live
-            // selections, when only the outer one actually is.
-            RadialRingLayer(state: state, showsSelectionWedge: dockState.windows.isEmpty)
+            RadialRingLayer(state: state)
             RadialRingLayer(state: dockState, highlightSpansFullBand: true)
             centerLabel
         }
@@ -59,18 +55,14 @@ struct RadialRingContainerView: View {
 }
 
 /// One ring's wedges + icons, between `state.innerRadius` and
-/// `state.outerRadius`. Renders nothing when `state.windows` is empty, which
-/// is how the dock ring stays invisible until it's actually populated.
+/// `state.outerRadius`. Renders nothing while the ring is hidden — only one
+/// of the two rings is ever on screen at a time.
 private struct RadialRingLayer: View {
     @ObservedObject var state: RingSessionState
     /// When true, the selection-feedback wedge spans this ring's full radial
     /// thickness (edge to edge) instead of just an inset outer band — used
     /// for the dock ring, whose entire width is the "button".
     var highlightSpansFullBand: Bool = false
-    /// Whether this ring draws its selection wedge at all. The window ring
-    /// turns it off while the dock ring is up, since it's no longer the ring
-    /// the mouse and keyboard are driving.
-    var showsSelectionWedge: Bool = true
 
     private var wedgeHalfStep: CGFloat {
         state.windows.count > 1 ? (.pi / CGFloat(state.windows.count)) : .pi
@@ -101,7 +93,7 @@ private struct RadialRingLayer: View {
     }
 
     var body: some View {
-        if state.windows.isEmpty {
+        if state.isHidden || state.windows.isEmpty {
             EmptyView()
         } else {
             let placements = state.placements
@@ -115,7 +107,7 @@ private struct RadialRingLayer: View {
                         outerRadius: highlightOuterRadius,
                         startAngle: .radians(Double(placement.angle - wedgeHalfStep)),
                         endAngle: .radians(Double(placement.angle + wedgeHalfStep)),
-                        isSelected: showsSelectionWedge && index == state.selectedIndex
+                        isSelected: index == state.selectedIndex
                     )
                 }
                 ForEach(Array(zip(state.windows.indices, placements)), id: \.0) { index, placement in

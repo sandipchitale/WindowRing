@@ -56,11 +56,10 @@ final class Preferences: ObservableObject {
 
     /// Re-reads the real login-item state. Call when the settings UI appears,
     /// since the user can change it from System Settings behind our back.
+    /// Assigning an unchanged value is already a no-op thanks to the guard in
+    /// `didSet`, so there's no second check here.
     func refreshLaunchAtLogin() {
-        let enabled = SMAppService.mainApp.status == .enabled
-        if launchAtLogin != enabled {
-            launchAtLogin = enabled
-        }
+        launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     init() {
@@ -73,6 +72,10 @@ final class Preferences: ObservableObject {
         includeMinimized = defaults.object(forKey: Keys.includeMinimized) as? Bool ?? true
         includeHidden = defaults.object(forKey: Keys.includeHidden) as? Bool ?? false
         maxWindowCount = defaults.object(forKey: Keys.maxWindowCount) as? Int ?? 8
-        launchAtLogin = SMAppService.mainApp.status == .enabled
+        // Not read from SMAppService here: that's a synchronous round trip to
+        // the service-management daemon, and this initializer runs on the
+        // launch path. Nothing needs the real value until the settings window
+        // appears, which calls refreshLaunchAtLogin() anyway.
+        launchAtLogin = false
     }
 }
