@@ -51,6 +51,13 @@ enum WindowDiscovery {
     /// Filters out palettes, sheets, and other non-standard AX windows so the
     /// ring only shows things a user would recognize as "a window".
     private static func isStandardWindow(_ element: AXUIElement) -> Bool {
+        // The role check is what keeps the Finder out of the ring when it has
+        // no windows open: the desktop is published in Finder's
+        // kAXWindowsAttribute as an AXScrollArea with no subrole at all, so
+        // the lenient subrole fallback below would otherwise let it through.
+        guard let role = copyAttribute(element, kAXRoleAttribute) as? String, role == kAXWindowRole else {
+            return false
+        }
         guard let subrole = copyAttribute(element, kAXSubroleAttribute) as? String else {
             // Some apps (older Java/cross-platform toolkits) omit subrole entirely;
             // don't punish them for it.
