@@ -332,6 +332,13 @@ and worth flagging for anyone changing the relevant files:
   "no subrole is fine" rule that exists for older Java/cross-platform toolkits;
   without that role check, Finder appears in the ring permanently even with
   every Finder window closed.
+- **Minimized windows change their AX subrole.** Calendar, Notes and System
+  Settings (among others) report their ordinary main window as `AXDialog`
+  rather than `AXStandardWindow` once it's minimized — Chrome doesn't, so it's
+  per-app. Window discovery therefore accepts any `AXWindow` that is currently
+  minimized regardless of subrole; without that, the subrole filter hid exactly
+  the minimized windows the ring is most useful for getting back to. Real
+  dialogs and palettes are still filtered out while they're on screen.
 - **Some apps omit AX subrole/title data**, which can make a window's title
   fall back to just the app name.
 - **Mac App Store distribution isn't possible** — App Sandbox is incompatible

@@ -24,9 +24,10 @@ enum WindowDiscovery {
             }
 
             for axWindow in axWindows {
-                guard isStandardWindow(axWindow) else { continue }
-
+                // Read minimized state first: it's part of deciding whether
+                // this counts as a window at all, not just whether to show it.
                 let minimized = (copyAttribute(axWindow, kAXMinimizedAttribute) as? Bool) ?? false
+                guard isRingWorthyWindow(axWindow, isMinimized: minimized) else { continue }
                 if minimized && !includeMinimized { continue }
 
                 let rawTitle = (copyAttribute(axWindow, kAXTitleAttribute) as? String) ?? ""
@@ -48,13 +49,13 @@ enum WindowDiscovery {
         return results
     }
 
-    /// Filters out palettes, sheets, and other non-standard AX windows so the
+    /// Filters out palettes, sheets, and other non-window AX elements so the
     /// ring only shows things a user would recognize as "a window".
-    private static func isStandardWindow(_ element: AXUIElement) -> Bool {
+    private static func isRingWorthyWindow(_ element: AXUIElement, isMinimized: Bool) -> Bool {
         // The role check is what keeps the Finder out of the ring when it has
         // no windows open: the desktop is published in Finder's
         // kAXWindowsAttribute as an AXScrollArea with no subrole at all, so
-        // the lenient subrole fallback below would otherwise let it through.
+        // the lenient subrole rules below would otherwise let it through.
         guard let role = copyAttribute(element, kAXRoleAttribute) as? String, role == kAXWindowRole else {
             return false
         }
@@ -63,7 +64,18 @@ enum WindowDiscovery {
             // don't punish them for it.
             return true
         }
-        return subrole == kAXStandardWindowSubrole
+        if subrole == kAXStandardWindowSubrole {
+            return true
+        }
+        // Once minimized, most apps stop reporting AXStandardWindow and report
+        // AXDialog instead — Calendar, Notes and System Settings all do it for
+        // their plain main window, though Chrome doesn't. Insisting on
+        // AXStandardWindow therefore hid exactly the minimized windows the
+        // ring exists to get back to. Anything already minimized is by
+        // definition a window the user put away and may want to restore, so
+        // subrole is not worth second-guessing in that state; real dialogs and
+        // palettes are still excluded while they're actually on screen.
+        return isMinimized
     }
 
     private static func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
