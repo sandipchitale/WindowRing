@@ -1,0 +1,6 @@
+WindowRing.xcodeproj/
+WindowRing/Generated/
+DerivedData/
+.DS_Store
+xcuserdata/
+*.xcuserstate
