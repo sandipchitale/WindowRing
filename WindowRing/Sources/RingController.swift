@@ -1,11 +1,12 @@
 import AppKit
 
 /// Orchestrates one shortcut-driven session, which can hold up to two ring
-/// layers: the window ring always shows first; a second press of the
-/// shortcut while it's open promotes to a second, outer ring listing running
-/// (Dock-visible) applications. Whichever ring is open last is "active" and
-/// owns mouse/keyboard selection; the shortcut collapses the rings back one
-/// at a time, while Escape (or a click outside) dismisses all of them at once.
+/// layers: an inner window ring and an outer ring of applications. Only one is
+/// ever on screen at a time — a plain tap of the shortcut leads with the window
+/// ring, a ⌘-qualified tap leads with the app ring, and further taps swap
+/// between them and then dismiss. Whichever ring is showing owns mouse and
+/// keyboard selection; Escape (or a click outside) dismisses everything at
+/// once.
 ///
 /// Keyboard and scroll input reach the rings through GlobalShortcut's event
 /// tap rather than through the overlay panel, so the panel never has to take
@@ -26,8 +27,9 @@ final class RingController {
         // (kCGEventTapDisabledByTimeout), which would kill the shortcut until
         // the next re-enable. The same goes for confirm, which activates
         // windows over AX.
-        shortcut.onTrigger = { [weak self] in
-            DispatchQueue.main.async { self?.handleShortcutPress() }
+        shortcut.onTrigger = { [weak self] augments in
+            let dockFirst = !augments.isDisjoint(with: [VirtualKey.commandLeft, VirtualKey.commandRight])
+            DispatchQueue.main.async { self?.handleShortcutTap(dockFirst: dockFirst) }
         }
         shortcut.onKeyDown = { [weak self] code, flags in
             self?.handleKeyDown(code, flags: flags) ?? false
@@ -43,6 +45,9 @@ final class RingController {
     private var session: RingSessionState?
     private var dockSession: RingSessionState?
     private var pendingDockApps: [WindowInfo] = []
+    /// The discovered windows, held so the window ring can be hidden and shown
+    /// again within one session (the ⌘ flow starts with it hidden).
+    private var pendingWindows: [WindowInfo] = []
     /// Whether the dock ring has already been shown during this session, so a
     /// press with only the window ring up can tell "not expanded yet" (show
     /// the dock ring) from "already collapsed back" (dismiss everything).
@@ -151,24 +156,78 @@ final class RingController {
         shortcut.start()
     }
 
-    /// The shortcut walks out and then back in: nothing → window ring →
-    /// + dock ring → dock ring hidden → everything hidden.
-    private func handleShortcutPress() {
+    /// Two entry points into the same session, differing only in which ring
+    /// comes up first, and each stepping toward dismissal on every further tap.
+    ///
+    /// Plain tap — windows first:
+    ///   nothing → window ring → app ring → back to window ring → dismissed.
+    ///
+    /// ⌘ tap — apps first:
+    ///   nothing → app ring → app ring swapped for window ring → dismissed.
+    ///
+    /// Either way only one ring is ever on screen at a time.
+    private func handleShortcutTap(dockFirst: Bool) {
         if session == nil {
-            beginWindowRing()
-        } else if dockSession != nil {
+            guard beginSession() else { return }
+            if dockFirst {
+                showDockRing()
+            } else {
+                showWindowRing()
+            }
+            return
+        }
+
+        if dockFirst {
+            // The app ring hands over to the window ring, and the tap after
+            // that is done. With no windows to hand over to, that middle step
+            // would be a blank overlay, so skip straight to dismissing.
+            if dockSession != nil, !pendingWindows.isEmpty {
+                hideDockRing()
+                showWindowRing()
+            } else {
+                endSession(activate: false)
+            }
+            return
+        }
+
+        if dockSession != nil {
             hideDockRing()
+            // Coming back from a ⌘-started session, the window ring may never
+            // have been shown yet.
+            showWindowRing()
         } else if dockRingWasShown {
             endSession(activate: false)
         } else {
-            beginDockRing()
+            showDockRing()
         }
+    }
+
+    /// Where the window ring's selection was when it was last hidden, so
+    /// bringing it back doesn't snap to the first item and throw away where
+    /// the user had got to.
+    private var hiddenWindowSelection: Int?
+
+    private func showWindowRing() {
+        guard let session, session.windows.isEmpty, !pendingWindows.isEmpty else { return }
+        session.reset(windows: pendingWindows)
+        if let restored = hiddenWindowSelection, pendingWindows.indices.contains(restored) {
+            session.selectedIndex = restored
+        }
+        hiddenWindowSelection = nil
+        debugLog("[WindowRing] showWindowRing(): \(pendingWindows.count) windows")
+    }
+
+    private func hideWindowRing() {
+        guard let session, !session.windows.isEmpty else { return }
+        hiddenWindowSelection = session.selectedIndex
+        session.reset(windows: [])
+        debugLog("[WindowRing] hideWindowRing()")
     }
 
     private func hideDockRing() {
         dockSession?.reset(windows: [])
         dockSession = nil
-        debugLog("[WindowRing] hideDockRing(): dock ring closed, window ring stays open")
+        debugLog("[WindowRing] hideDockRing(): app ring closed")
     }
 
     private func confirmActiveSelection() {
@@ -186,7 +245,11 @@ final class RingController {
         }
     }
 
-    private func beginWindowRing() {
+    /// Builds the overlay and both ring states for a new session, with both
+    /// rings empty — the caller decides which one to show first. Returns false
+    /// if there's nothing at all to show.
+    @discardableResult
+    private func beginSession() -> Bool {
         let pressPoint = NSEvent.mouseLocation
 
         let allWindows = WindowDiscovery.discoverWindows(
@@ -195,13 +258,10 @@ final class RingController {
         )
         let ordered = MRUOrdering(history: mruTracker.history).order(allWindows)
         let limited = Array(ordered.prefix(preferences.maxWindowCount))
-        debugLog("[WindowRing] beginWindowRing(): discovered \(allWindows.count) windows, showing \(limited.count) at \(pressPoint)")
-        guard !limited.isEmpty else {
-            debugLog("[WindowRing] beginWindowRing(): no eligible windows, ring will not show")
-            return
-        }
+        pendingWindows = limited
+        debugLog("[WindowRing] beginSession(): discovered \(allWindows.count) windows, showing \(limited.count) at \(pressPoint)")
 
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pressPoint) }) ?? NSScreen.main else { return }
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pressPoint) }) ?? NSScreen.main else { return false }
         let visible = screen.visibleFrame
 
         let itemSize: CGFloat = 64
@@ -218,6 +278,11 @@ final class RingController {
         dockLaunchURLs = Dictionary(uniqueKeysWithValues: dockEntries.compactMap { entry in
             entry.launchURL.map { (entry.info.id, $0) }
         })
+        // Nothing to show in either ring: don't flash an empty overlay.
+        guard !limited.isEmpty || !pendingDockApps.isEmpty else {
+            debugLog("[WindowRing] beginSession(): no windows and no dock apps, nothing to show")
+            return false
+        }
         let dockThickness = RadialLayout.suggestedRadius(count: max(pendingDockApps.count, 1), itemSize: itemSize, minRadius: 70, maxRadius: 130)
         let dockInnerRadius = windowOuterRadius + gap
         let dockOuterRadius = dockInnerRadius + dockThickness
@@ -232,7 +297,10 @@ final class RingController {
         windowFrame = frame
 
         let centerInView = RadialLayout.viewLocalPoint(fromGlobal: pressPoint, windowFrame: frame)
-        let windowState = RingSessionState(windows: limited, centerInView: centerInView, innerRadius: 0, outerRadius: windowOuterRadius)
+        // Both rings start empty and are populated by show{Window,Dock}Ring(),
+        // so either can lead and either can be hidden again without any
+        // resize or recentring of what's already on screen.
+        let windowState = RingSessionState(windows: [], centerInView: centerInView, innerRadius: 0, outerRadius: windowOuterRadius)
         let dockState = RingSessionState(windows: [], centerInView: centerInView, innerRadius: dockInnerRadius, outerRadius: dockOuterRadius)
         session = windowState
 
@@ -250,9 +318,10 @@ final class RingController {
             self?.endSession(activate: false)
         }
 
-        // Hold onto the (empty-for-now) dock session so a second press can
-        // just populate it in place.
+        // Hold onto the (empty-for-now) dock session so a later tap can just
+        // populate it in place.
         self.dockSessionPlaceholder = dockState
+        return true
     }
 
     /// The dock ring's session object, created empty alongside the window
@@ -260,12 +329,15 @@ final class RingController {
     /// populates it.
     private var dockSessionPlaceholder: RingSessionState?
 
-    private func beginDockRing() {
-        guard let dockState = dockSessionPlaceholder else { return }
+    private func showDockRing() {
+        guard let dockState = dockSessionPlaceholder, !pendingDockApps.isEmpty else { return }
+        // Only ever one ring on screen at a time: the window ring steps aside
+        // whenever the app ring comes up, in both flows.
+        hideWindowRing()
         dockState.reset(windows: pendingDockApps)
         dockSession = dockState
         dockRingWasShown = true
-        debugLog("[WindowRing] beginDockRing(): showing \(pendingDockApps.count) dock apps")
+        debugLog("[WindowRing] showDockRing(): showing \(pendingDockApps.count) dock apps")
     }
 
     private func endSession(activate: Bool) {
@@ -283,6 +355,7 @@ final class RingController {
         dockSession = nil
         dockSessionPlaceholder = nil
         pendingDockApps = []
+        pendingWindows = []
         dockLaunchURLs = [:]
         dockRingWasShown = false
 

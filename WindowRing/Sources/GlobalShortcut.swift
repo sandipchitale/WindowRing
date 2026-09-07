@@ -34,9 +34,16 @@ import CoreGraphics
 /// family at once. That combination isn't offered by the shortcut recorder.
 final class GlobalShortcut {
     var combo: Set<CGKeyCode>
-    /// The combo was tapped cleanly: pressed and released with nothing else
-    /// touched in between.
-    var onTrigger: (() -> Void)?
+    /// Modifier keys that may be held *alongside* the combo without spoiling
+    /// the tap. They don't open a different shortcut so much as qualify this
+    /// one: which of them were held is reported to `onTrigger`, letting the
+    /// same tap mean something slightly different (⌘ + the combo opens the
+    /// app ring first). Everything not listed here still cancels the tap.
+    var augmentingModifiers: Set<CGKeyCode> = [VirtualKey.commandLeft, VirtualKey.commandRight]
+    /// The combo was tapped cleanly: pressed and released with nothing but
+    /// `augmentingModifiers` touched in between. The argument is whichever of
+    /// those were held at any point during the hold.
+    var onTrigger: ((Set<CGKeyCode>) -> Void)?
     /// A key went down. Return true to act on it *and* swallow it.
     var onKeyDown: ((CGKeyCode, NSEvent.ModifierFlags) -> Bool)?
     /// A scroll happened, already normalized to "steps clockwise" (negative =
@@ -55,6 +62,10 @@ final class GlobalShortcut {
     /// began. Cleared by any foreign key or mouse button; if it's still true
     /// when the combo is released, that release is a tap.
     private var holdIsClean = false
+    /// Which augmenting modifiers were held at any point during this hold.
+    /// Accumulated rather than sampled at release, because the user may well
+    /// let go of ⌘ a moment before the combo key itself.
+    private var augmentsDuringHold: Set<CGKeyCode> = []
     /// Accumulated scroll distance not yet spent on a selection step.
     private var scrollAccumulator = 0.0
 
@@ -127,6 +138,7 @@ final class GlobalShortcut {
         modifiersDown.removeAll()
         isHoldingCombo = false
         holdIsClean = false
+        augmentsDuringHold = []
         scrollAccumulator = 0
     }
 
@@ -157,7 +169,9 @@ final class GlobalShortcut {
         case .flagsChanged:
             if isModifierPhysicallyDown(keyCode, flags: event.flags) {
                 modifiersDown.insert(keyCode)
-                if !combo.contains(keyCode) {
+                if augmentingModifiers.contains(keyCode) {
+                    if isHoldingCombo { augmentsDuringHold.insert(keyCode) }
+                } else if !combo.contains(keyCode) {
                     holdIsClean = false
                 }
             } else {
@@ -178,19 +192,22 @@ final class GlobalShortcut {
 
         if satisfied && !isHoldingCombo {
             isHoldingCombo = true
-            // Any modifier already down that isn't part of the combo (e.g. the
-            // user was already holding Shift) makes this hold dirty from the
-            // start.
-            holdIsClean = modifiersDown.isSubset(of: combo)
+            // Any modifier already down that is neither part of the combo nor
+            // an allowed augment (e.g. the user was already holding Shift)
+            // makes this hold dirty from the start.
+            let extras = modifiersDown.subtracting(combo)
+            holdIsClean = extras.isSubset(of: augmentingModifiers)
+            augmentsDuringHold = extras.intersection(augmentingModifiers)
         } else if !satisfied && isHoldingCombo {
             isHoldingCombo = false
             if holdIsClean {
-                debugLog("[WindowRing] GlobalShortcut: clean tap of \(combo)")
-                onTrigger?()
+                debugLog("[WindowRing] GlobalShortcut: clean tap of \(combo), augments=\(augmentsDuringHold)")
+                onTrigger?(augmentsDuringHold)
             } else {
                 debugLog("[WindowRing] GlobalShortcut: hold was dirty, not triggering")
             }
             holdIsClean = false
+            augmentsDuringHold = []
         }
     }
 

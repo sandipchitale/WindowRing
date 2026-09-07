@@ -104,20 +104,42 @@ this, and the project is unsandboxed by design (no entitlements file at all).
   the transparent area inside the overlay, or any other app's window). Either
   one hides every ring at once — nothing is activated.
 
+### Starting with the app ring: ⌘ + Right Option
+
+Tapping the shortcut with **Command held** leads with the app ring instead, and
+shows the rings in the other order:
+
+| Tap | Result |
+|---|---|
+| ⌘ + Right Option | The app ring alone (the window ring stays hidden) |
+| ⌘ + Right Option again | The app ring is swapped for the window ring |
+| ⌘ + Right Option again | Everything is dismissed |
+
+Command is the only modifier allowed to accompany the shortcut this way —
+anything else cancels the tap, exactly as any other key does. The two flows
+share one session, so you can start with ⌘ and finish with a plain tap or the
+other way round.
+
+**Only one ring is ever on screen at a time**: the window ring steps aside
+whenever the app ring comes up, and comes back — with its selection intact —
+when the app ring goes away. Ring geometry is computed once for the whole
+session and never changes, which is why the app ring keeps its outer position
+and leaves the middle empty.
+
 ### The app ring (outer) — a radial Dock
 
 - **Tap Right Option again** while the window ring is up: a second, outer
   ring appears listing your **applications** — everything pinned in your real
   Dock (read from `com.apple.dock`'s `persistent-apps`), plus any running app
   that isn't pinned.
-- While it's open, the outer ring owns selection: the mouse and the arrow/Tab
-  keys drive it, and the center hub shows *its* selected app's name. The
-  selection wedge spans the outer ring's full radial thickness, because the
-  whole band is the button.
+- The window ring is hidden while it's up, so the mouse, the arrow/Tab keys
+  and the center hub all belong to the app ring unambiguously. Its selection
+  wedge spans the ring's full radial thickness, because the whole band is the
+  button.
 - **Confirm** launches the app if it isn't running, or activates it (unhiding
   first if needed) if it is.
-- **A third tap** collapses the outer ring, leaving the window ring up. A
-  **fourth** dismisses everything.
+- **A third tap** collapses the app ring and brings the window ring back,
+  still on whatever was selected before. A **fourth** dismisses everything.
 - **Escape** and clicking outside always dismiss *everything* at once, from
   either ring.
 
@@ -125,7 +147,8 @@ this, and the project is unsandboxed by design (no entitlements file at all).
 
 | Key | Action |
 |---|---|
-| Right Option (default shortcut) | Open the window ring → open the app ring → collapse the app ring → dismiss |
+| Right Option (default shortcut) | Open the window ring → swap to the app ring → swap back → dismiss |
+| ⌘ + Right Option | Open the app ring → swap it for the window ring → dismiss |
 | → or Tab | Select the next item clockwise |
 | ← or Shift-Tab | Select the next item counter-clockwise |
 | Scroll down / up | Select the next item clockwise / counter-clockwise |
@@ -204,8 +227,8 @@ reliable global shortcut/overlay/window-activation behavior.
 | `RadialOverlayWindow.swift` | Borderless, non-activating `NSPanel` hosting both ring layers. Never becomes key; forwards clicks to `RingController`. |
 | `RadialRingView.swift` | SwiftUI ring UI: `RadialRingContainerView` composes both ring layers plus the shared center label; `WedgeShape` (inset, rounded-corner pie slice) and `AnnulusShape` do the drawing. |
 | `RingSessionState.swift` | Live per-ring state (item list, geometry, selected index) driving the SwiftUI view. One instance per ring. |
-| `RingController.swift` | Orchestrates a session across both rings: open, promote, collapse, confirm, dismiss. |
-| `GlobalShortcut.swift` | `CGEventTap` that detects a clean *tap* of a configurable modifier combo, and routes keyboard/scroll events to the ring, consuming the ones it handles. |
+| `RingController.swift` | Orchestrates a session across both rings: which one leads, promote, collapse, confirm, dismiss. |
+| `GlobalShortcut.swift` | `CGEventTap` that detects a clean *tap* of a configurable modifier combo (reporting whether ⌘ qualified it), and routes keyboard/scroll events to the ring, consuming the ones it handles. |
 | `WindowActivation.swift` | Un-minimize/un-hide/activate/raise sequence for the selected window. |
 | `PermissionsManager.swift` | Accessibility-trust check, prompt, polling, and deep link to System Settings. |
 | `Preferences.swift` / `PreferencesView.swift` | UserDefaults-backed settings + the settings window, including the shortcut recorder. |
