@@ -98,8 +98,11 @@ private struct RadialRingLayer: View {
         } else {
             let placements = state.placements
             ZStack {
-                AnnulusShape(center: state.centerInView, innerRadius: state.innerRadius, outerRadius: state.outerRadius)
-                    .fill(.thickMaterial, style: FillStyle(eoFill: true))
+                let annulus = AnnulusShape(center: state.centerInView, innerRadius: state.innerRadius, outerRadius: state.outerRadius)
+                annulus.fill(.thickMaterial, style: FillStyle(eoFill: true))
+                // A whisper of teal over the frosted base, just enough to give
+                // the disc a colour of its own without reading as tinted glass.
+                annulus.fill(Color.teal.opacity(0.12), style: FillStyle(eoFill: true))
                 ForEach(Array(zip(state.windows.indices, placements)), id: \.0) { index, placement in
                     WedgeSliceView(
                         center: state.centerInView,

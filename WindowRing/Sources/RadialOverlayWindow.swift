@@ -20,6 +20,10 @@ final class RadialOverlayWindow: NSPanel {
     /// actually on a ring (confirm) or in the panel's transparent margin
     /// around it (dismiss), since only it knows the current ring geometry.
     var onMouseDownAt: ((NSPoint) -> Void)?
+    /// The mouse moved with the button still down, at this window-local point.
+    /// Only meaningful after a `onMouseDownAt` that began a drag.
+    var onMouseDraggedTo: ((NSPoint) -> Void)?
+    var onMouseUp: (() -> Void)?
 
     init() {
         super.init(
@@ -45,6 +49,14 @@ final class RadialOverlayWindow: NSPanel {
 
     override func mouseDown(with event: NSEvent) {
         onMouseDownAt?(event.locationInWindow)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        onMouseDraggedTo?(event.locationInWindow)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        onMouseUp?()
     }
 
     func presentSession(state: RingSessionState, dockState: RingSessionState, frame: NSRect) {

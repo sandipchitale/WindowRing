@@ -51,6 +51,10 @@ final class GlobalShortcut {
     /// A scroll happened, already normalized to "steps clockwise" (negative =
     /// counter-clockwise). Return true to swallow it.
     var onScroll: ((Int) -> Bool)?
+    /// The tap had to be torn down because the process is no longer allowed to
+    /// own one — Accessibility was revoked, or the tap kept being disabled.
+    /// Called on the main queue, after `stop()` has already run.
+    var onTapTornDown: (() -> Void)?
     /// Whether a ring is currently on screen. Scroll is the one event class
     /// this tap has no use for otherwise, and a trackpad emits a continuous
     /// stream of them — so while no ring is showing they're rejected before
@@ -76,6 +80,10 @@ final class GlobalShortcut {
     private var qualifiersDuringHold: NSEvent.ModifierFlags = []
     /// Accumulated scroll distance not yet spent on a selection step.
     private var scrollAccumulator = 0.0
+    /// When the current burst of tap-disabled notifications began, and how
+    /// many have arrived in it — see `handleTapDisabled`.
+    private var reEnableBurstStart: CFAbsoluteTime = 0
+    private var reEnableBurstCount = 0
 
     init(combo: Set<CGKeyCode>) {
         self.combo = combo
@@ -104,9 +112,7 @@ final class GlobalShortcut {
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                     if let refcon {
                         let shortcut = Unmanaged<GlobalShortcut>.fromOpaque(refcon).takeUnretainedValue()
-                        if let tap = shortcut.eventTap {
-                            CGEvent.tapEnable(tap: tap, enable: true)
-                        }
+                        shortcut.handleTapDisabled()
                     }
                     return Unmanaged.passUnretained(event)
                 }
@@ -134,6 +140,63 @@ final class GlobalShortcut {
         return true
     }
 
+    /// macOS disabled the tap. Re-enabling is the right answer for the
+    /// ordinary cause — the callback took too long once — but it is exactly
+    /// the wrong answer when the reason is that Accessibility was revoked
+    /// while the app was running.
+    ///
+    /// This tap is a blocking `.defaultTap` head-inserted into the session tap,
+    /// so every keystroke and click in the system flows through it. Re-enabling
+    /// one the process is no longer trusted to own puts it straight back in
+    /// front of the whole HID stream only to be disabled again, and the loop
+    /// that follows stalls the event stream on every input: the user's mouse
+    /// and keyboard appear to stop working, system-wide, until Window Ring is
+    /// quit. So a revoked grant tears the tap down for good instead — the
+    /// 2-second trust poll in PermissionsManager re-creates it if the user
+    /// grants access again.
+    ///
+    /// `AXIsProcessTrusted()` is a TCC round-trip and this runs inside the tap
+    /// callback, where nothing slow may run. That's acceptable only because
+    /// this branch fires on tap-disabled notifications, not on ordinary events.
+    ///
+    /// The count is a backstop for the same freeze arriving by another route:
+    /// if the tap is disabled repeatedly in a short window while trust still
+    /// reads as granted (TCC's answer can lag its own revocation), stop
+    /// fighting the system and shut down rather than spin.
+    private func handleTapDisabled() {
+        guard AXIsProcessTrusted() else {
+            debugLog("[WindowRing] GlobalShortcut: tap disabled and process is no longer trusted, tearing it down")
+            tearDown()
+            return
+        }
+
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - reEnableBurstStart > 5.0 {
+            reEnableBurstStart = now
+            reEnableBurstCount = 0
+        }
+        reEnableBurstCount += 1
+        guard reEnableBurstCount <= 5 else {
+            debugLog("[WindowRing] GlobalShortcut: tap disabled \(reEnableBurstCount) times in 5s, tearing it down")
+            tearDown()
+            return
+        }
+
+        guard let eventTap else { return }
+        debugLog("[WindowRing] GlobalShortcut: tap was disabled, re-enabling")
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+    }
+
+    /// Deferred to the main queue: `stop()` removes the run loop source the
+    /// callback is running under, which must not happen inside the callback.
+    private func tearDown() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.eventTap != nil else { return }
+            self.stop()
+            self.onTapTornDown?()
+        }
+    }
+
     func stop() {
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
@@ -148,6 +211,8 @@ final class GlobalShortcut {
         holdIsClean = false
         qualifiersDuringHold = []
         scrollAccumulator = 0
+        reEnableBurstStart = 0
+        reEnableBurstCount = 0
     }
 
     /// Returns true if the event was consumed and must not reach anyone else.

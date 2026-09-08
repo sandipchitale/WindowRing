@@ -65,6 +65,12 @@ bar icon, Preferences) but the shortcut does nothing, and the settings window
 shows an "Accessibility access required" banner with a button that deep-links
 straight to that Settings pane.
 
+Revoking access while the app is running is handled too: the event tap is torn
+down immediately and any ring on screen is dismissed, so the app goes quietly
+dormant rather than fighting the system for the keyboard and mouse (see
+Implementation notes). Re-enable the checkbox and the shortcut comes back
+within a couple of seconds, still without a relaunch.
+
 > **You must re-grant Accessibility after every rebuild.** The project uses
 > Xcode's ad-hoc "Sign to Run Locally" signature, which is *different on every
 > build*. macOS keys the Accessibility grant to the signature, so a rebuilt
@@ -103,6 +109,11 @@ this, and the project is unsandboxed by design (no entitlements file at all).
 - **Cancel** with **Escape**, or by **clicking outside** the rings (including
   the transparent area inside the overlay, or any other app's window). Either
   one hides every ring at once — nothing is activated.
+- **Drag the ring by its center hub** to move it. The hub — the disc in the
+  middle where the selected item's title is drawn — is the one part of the ring
+  that isn't an item, so pressing there and moving takes the whole overlay
+  (both rings) with the pointer. Press and release without moving and it's an
+  ordinary click on the ring, which confirms.
 
 ### Starting with the app ring: ⌘ + Right Option
 
@@ -312,6 +323,21 @@ and worth flagging for anyone changing the relevant files:
   silently killing the shortcut. `RingController` therefore hops to the main
   queue before doing any of that work, while still returning the
   consume/pass-through decision to the tap synchronously.
+- **Never re-enable an event tap you're no longer trusted to own.** macOS
+  disables a tap by sending its own callback a `tapDisabledBy…` event, and the
+  standard response is to turn it straight back on — right for the ordinary
+  cause (the callback overran once), and badly wrong when the real reason is
+  that the user just revoked Accessibility in System Settings. This tap is a
+  blocking `.defaultTap` head-inserted into the session tap, so *every*
+  keystroke and click on the machine flows through it; putting it back in front
+  of the HID stream only for the system to disable it again stalls input on
+  each round trip, and the user's mouse and keyboard appear to stop working
+  system-wide until Window Ring is quit. `GlobalShortcut.handleTapDisabled()`
+  therefore checks `AXIsProcessTrusted()` first and tears the tap down for good
+  when trust is gone (with a rate-limit backstop for the case where TCC's
+  answer lags its own revocation), and `AppDelegate` watches
+  `PermissionsManager.isTrusted` in *both* directions rather than only reacting
+  to access being granted.
 - **Distinct synthetic pids in `DockDiscovery`.** `AXUIElementCreateApplication`
   called with the same pid twice returns elements that compare `CFEqual`, so
   using a single placeholder pid (e.g. `0`) for every not-yet-running pinned

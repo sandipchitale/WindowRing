@@ -7,6 +7,9 @@ import CoreGraphics
 /// populated once, up front, and then shown or hidden via `isHidden` — no
 /// resize, recentre, or reload is ever needed when the visible ring changes.
 final class RingSessionState: ObservableObject {
+    /// Where the ring is centred, in the overlay's own (y-down) coordinates.
+    /// Always the overlay's midpoint — dragging moves the overlay itself, so
+    /// this never changes and the ring can never be clipped by the panel edge.
     let centerInView: CGPoint
     let innerRadius: CGFloat
     let outerRadius: CGFloat

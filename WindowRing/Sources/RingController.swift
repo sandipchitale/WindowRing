@@ -37,6 +37,13 @@ final class RingController {
         shortcut.onScroll = { [weak self] steps in
             self?.handleScroll(steps: steps) ?? false
         }
+        // The tap is the ring's only keyboard route, so a ring still on screen
+        // when the tap goes away can't be dismissed with Escape any more. Take
+        // it down with the tap rather than leaving a click-through-proof panel
+        // sitting over the user's screen.
+        shortcut.onTapTornDown = { [weak self] in
+            self?.endSession(activate: false)
+        }
         return shortcut
     }()
 
@@ -85,7 +92,25 @@ final class RingController {
     init(preferences: Preferences) {
         self.preferences = preferences
         overlayWindow.onMouseDownAt = { [weak self] point in self?.handleMouseDown(atWindowPoint: point) }
+        overlayWindow.onMouseDraggedTo = { [weak self] _ in self?.handleMouseDragged() }
+        overlayWindow.onMouseUp = { [weak self] in self?.handleMouseUp() }
     }
+
+    /// Where in the overlay the pointer grabbed it, so the ring doesn't jump
+    /// under the cursor. Non-nil only between mouse-down on the hub and the
+    /// matching mouse-up.
+    private var dragGrabInWindow: NSPoint?
+    /// Whether that grab has become a real drag yet. Until it does, the
+    /// mouse-up is treated as a plain click on the hub — see `handleMouseUp`.
+    private var dragDidMove = false
+    /// How far the pointer must travel before a grab counts as a drag rather
+    /// than a click, so an unsteady hand still confirms.
+    private static let dragThreshold: CGFloat = 3
+
+    /// The radius around the centre that grabs the rings instead of selecting.
+    /// It matches the hub the selected item's title is drawn in, which is the
+    /// part of the ring that visibly isn't an item.
+    private static let dragHandleRadius: CGFloat = 46
 
     /// Every keystroke in the system passes through here. Returns true only
     /// for keys a visible ring actually acts on — everything else falls
@@ -149,10 +174,17 @@ final class RingController {
     /// every ring at once — unlike Escape, this doesn't peel one at a time.
     private func handleMouseDown(atWindowPoint point: NSPoint) {
         guard let session else { return }
-        let localPoint = CGPoint(x: point.x, y: windowFrame.height - point.y)
+        let localPoint = viewLocalPoint(point)
         let dx = localPoint.x - session.centerInView.x
         let dy = localPoint.y - session.centerInView.y
         let distance = sqrt(dx * dx + dy * dy)
+
+        if distance <= Self.dragHandleRadius {
+            dragGrabInWindow = point
+            dragDidMove = false
+            return
+        }
+
         let outerBound = activeSession?.outerRadius ?? session.outerRadius
         if distance <= outerBound {
             confirmActiveSelection()
@@ -161,9 +193,55 @@ final class RingController {
         }
     }
 
+    /// Drags the whole overlay — and so both rings — keeping the grabbed point
+    /// under the cursor, wherever the user takes it. The pointer's global
+    /// position is used rather than the event's window-local one, which would
+    /// be measured against a window that is itself moving.
+    private func handleMouseDragged() {
+        guard let grab = dragGrabInWindow else { return }
+        let global = NSEvent.mouseLocation
+        let origin = NSPoint(x: global.x - grab.x, y: global.y - grab.y)
+        if !dragDidMove {
+            let moved = hypot(origin.x - windowFrame.origin.x, origin.y - windowFrame.origin.y)
+            guard moved > Self.dragThreshold else { return }
+            dragDidMove = true
+        }
+        overlayWindow.setFrameOrigin(origin)
+        windowFrame.origin = origin
+    }
+
+    /// A press on the hub that never became a drag is just a click on the ring,
+    /// and confirms — the same as a click anywhere else inside it. Without this
+    /// the hub is a dead zone: the one part of the ring where clicking does
+    /// nothing at all, right where a user reaches to get rid of it.
+    private func handleMouseUp() {
+        let wasGrabbed = dragGrabInWindow != nil
+        dragGrabInWindow = nil
+        if wasGrabbed && !dragDidMove {
+            confirmActiveSelection()
+        }
+        dragDidMove = false
+    }
+
+    /// The panel's coordinates are AppKit y-up; everything about the rings is
+    /// SwiftUI y-down.
+    private func viewLocalPoint(_ point: NSPoint) -> CGPoint {
+        CGPoint(x: point.x, y: windowFrame.height - point.y)
+    }
+
+
     @discardableResult
     func startListeningForShortcut() -> Bool {
         shortcut.start()
+    }
+
+    /// Accessibility can be taken away while the app is running, and when it is
+    /// the event tap has to go with it — see `GlobalShortcut.handleTapDisabled`
+    /// for what happens if it doesn't. Any ring still on screen goes too, since
+    /// without the tap it has no keyboard route left.
+    func stopListeningForShortcut() {
+        endSession(activate: false)
+        shortcut.stop()
     }
 
     func shortcutComboDidChange() {
@@ -238,9 +316,6 @@ final class RingController {
         let limited = Array(ordered.prefix(preferences.maxWindowCount))
         debugLog("[WindowRing] beginSession(): discovered \(allWindows.count) windows, showing \(limited.count) at \(pressPoint)")
 
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pressPoint) }) ?? NSScreen.main else { return false }
-        let visible = screen.visibleFrame
-
         let itemSize: CGFloat = 64
         let windowRadius = RadialLayout.suggestedRadius(count: limited.count, itemSize: itemSize, minRadius: 90, maxRadius: 170)
         let windowOuterRadius = windowRadius + 36
@@ -267,13 +342,16 @@ final class RingController {
         let margin: CGFloat = itemSize + 40
         let side = (dockOuterRadius + margin) * 2
 
-        var origin = NSPoint(x: pressPoint.x - side / 2, y: pressPoint.y - side / 2)
-        origin.x = min(max(origin.x, visible.minX), max(visible.minX, visible.maxX - side))
-        origin.y = min(max(origin.y, visible.minY), max(visible.minY, visible.maxY - side))
+        // Centred on the cursor, always — never nudged inward to stay on
+        // screen. Near an edge the overlay simply hangs off it, so the ring's
+        // centre is the pointer wherever the pointer happens to be.
+        let origin = NSPoint(x: pressPoint.x - side / 2, y: pressPoint.y - side / 2)
         let frame = NSRect(origin: origin, size: NSSize(width: side, height: side))
         windowFrame = frame
 
-        let centerInView = RadialLayout.viewLocalPoint(fromGlobal: pressPoint, windowFrame: frame)
+        // The overlay is centred on the cursor, so its own midpoint is the
+        // cursor.
+        let centerInView = CGPoint(x: side / 2, y: side / 2)
         // Both rings are populated now and stay that way for the session; only
         // `isHidden` changes afterwards. That's what lets either ring lead, and
         // either be hidden and brought back with its selection intact, without
@@ -315,6 +393,8 @@ final class RingController {
         }
         mouseMonitor = nil
         outsideClickMonitor = nil
+        dragGrabInWindow = nil
+        dragDidMove = false
         shortcut.ringIsVisible = false
         overlayWindow.dismiss()
         session = nil
